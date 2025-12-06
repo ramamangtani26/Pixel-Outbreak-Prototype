@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixel Outbreak Prototype</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+        body {
+            background-color: #1a1a2e;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            flex-direction: column;
+            font-family: 'Inter', sans-serif;
+            padding: 20px;
+        }
+        canvas {
+            border: 4px solid #3d0000;
+            background-color: #000;
+            image-rendering: pixelated;
+            max-width: 90vw;
+            max-height: 90vh;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+        .controls-info {
+            color: #fff;
+            margin-top: 20px;
+            text-align: center;
+        }
+        .controls-info kbd {
+            display: inline-block;
+            padding: 2px 6px;
+            border: 1px solid #777;
+            border-radius: 3px;
+            box-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
+            background-color: #222;
+            color: #f0f0f0;
+            font-family: 'Press Start 2P', monospace;
+            font-size: 10px;
+            margin: 0 2px;
+        }
+        h1 {
+            color: #ffcc00;
+            font-family: 'Press Start 2P', monospace;
+            text-shadow: 2px 2px #000;
+            margin-bottom: 10px;
+        }
+        .message-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            border: 4px solid #ff0000;
+            border-radius: 10px;
+            padding: 20px 40px;
+            color: #fff;
+            text-align: center;
+            font-family: 'Press Start 2P', monospace;
+            z-index: 10;
+            display: none;
+            box-shadow: 0 0 20px #ff0000;
+        }
+    </style>
+</head>
+<body>
+
+    <h1 class="text-2xl sm:text-4xl">OUTBREAK PROTOCOL</h1>
+    <canvas id="gameCanvas" width="800" height="400"></canvas>
+
+    <div class="controls-info">
+        <p>
+            <kbd>A</kbd> <kbd>D</kbd> - Move |
+            <kbd>W</kbd> - Jump |
+            <kbd>Space</kbd> - Shoot
+        </p>
+    </div>
+
+    <div id="messageBox" class="message-box">
+        <p id="messageText"></p>
+        <button onclick="startGame()" class="mt-4 bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded-md text-sm cursor-pointer shadow-lg transition duration-150">
+            Restart
+        </button>
+    </div>
+
+    <script>
+        // --- Global Firebase Variables (Required Setup) ---
+        // Access global variables using window scope check to avoid ReferenceError on initialization.
+        const appId = typeof window._app_id !== 'undefined' ? window._app_id : 'default-app-id';
+        const firebaseConfig = typeof window._firebase_config !== 'undefined' ? JSON.parse(window._firebase_config) : {};
+        const initialAuthToken = typeof window._initial_auth_token !== 'undefined' ? window._initial_auth_token : null;
+        
+        // NOTE: Firebase is not strictly needed for this single-player game,
+        // but the environment mandates including the setup.
+
+        // --- Game Setup ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const messageBox = document.getElementById('messageBox');
+        const messageText = document.getElementById('messageText');
+
+        // Game Constants
+        const GRAVITY = 0.5;
+        const PLAYER_SPEED = 4;
+        const JUMP_FORCE = -12;
+        const PROJECTILE_SPEED = 10;
+
+        let gameLoopInterval;
+        let isGameOver = false;
+
+        // Key State
+        const keys = {
+            a: false,
+            d: false,
+            w: false,
+            space: false,
+            tab: false // Added for future weapon switching (Section 3E)
+        };
+
+        // Player object
+        let player = {
+            x: 50,
+            y: 300,
+            width: 15,
+            height: 30,
+            vx: 0,
+            vy: 0,
+            onGround: false,
+            health: 3,
+            color: '#ff4d4d', // Red/Blue color scheme
+            facing: 1, // 1 for right, -1 for left
+            // --- Invincibility Properties (Section 1B) ---
+            isInvincible: false,
+            invincibleTimer: 0,
+            invincibleDuration: 120, // 2 seconds at 60 FPS
+            // --- Weapon Property (Section 3E) ---
+            currentWeapon: 'Bullet' // 'Bullet' or 'Grenade'
+        };
+
+        let particles = []; // New array for particles (Section 2D)
+
+        // Function to handle player damage and respawn (Updated with Invincibility Guard)
+        function takeDamageAndRespawn() {
+            if (player.isInvincible) {
+                // Optional: add a slight push back to the player
+                const enemyVx = enemies.find(e => e.isAlive && 
+                    player.x < e.x + e.width && player.x + player.width > e.x &&
+                    player.y < e.y + e.height && player.y + player.height > e.y)?.vx || 0;
+                player.x += enemyVx > 0 ? -5 : 5;
+                return; 
+            }
+
+            player.health -= 1;
+            
+            // Respawn at the starting position
+            player.x = 50; 
+            player.y = 300;
+            // Reset vertical velocity to prevent strange movement after teleport
+            player.vy = 0; 
+            
+            // Activate invincibility (Section 1B)
+            player.isInvincible = true;
+            player.invincibleTimer = player.invincibleDuration;
+            
+            if (player.health <= 0) {
+                endGame("Game Over! You were defeated by the outbreak.");
+            }
+        }
+
+        // Particle class (Section 2D)
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 5; // Random horizontal velocity
+                this.vy = Math.random() * -5; // Upward velocity
+                this.life = 30; // Life in frames (approx 0.5s)
+                this.color = color;
+            }
+            update() {
+                this.vy += GRAVITY * 0.5; // Less affected by gravity
+                this.x += this.vx;
+                this.y += this.vy;
+                this.life--;
+            }
+            draw() {
+                if (this.life > 0) {
+                    ctx.fillStyle = this.color;
+                    ctx.fillRect(this.x, this.y, 2, 2);
+                }
+            }
+        }
+
+        // Enemy class
+        class Enemy {
+            constructor(x, y, width, height, color, health = 1, patrolRange = 50) {
+                this.x = x;
+                this.y = y;
+                this.width = width;
+                this.height = height;
+                this.color = color;
+                this.vx = -1; // Starts moving left
+                this.vy = 0;
+                this.onGround = false;
+                this.health = health;
+                this.isAlive = true;
+                this.patrolRange = patrolRange;
+                this.startX = x;
+            }
+
+            draw() {
+                if (!this.isAlive) return;
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+                // Draw a simple gun
+                ctx.fillStyle = '#654321';
+                ctx.fillRect(this.x + (this.vx < 0 ? this.width : -5), this.y + 10, 10, 3);
+            }
+
+            update(platforms) {
+                if (!this.isAlive) return;
+
+                // Simple AI: Patrol logic
+                if (this.x < this.startX - this.patrolRange || this.x > this.startX + this.patrolRange) {
+                    this.vx *= -1;
+                }
+                this.x += this.vx;
+
+                // Apply gravity
+                this.vy += GRAVITY;
+                this.y += this.vy;
+
+                this.onGround = false;
+                this.handleCollision(platforms);
+
+                // Simple collision with player
+                if (
+                    player.x < this.x + this.width &&
+                    player.x + player.width > this.x &&
+                    player.y < this.y + this.height &&
+                    player.y + player.height > this.y
+                ) {
+                    // Collision detected
+                    takeDamageAndRespawn();
+                }
+            }
+
+            handleCollision(platforms) {
+                platforms.forEach(p => {
+                    if (
+                        this.x < p.x + p.width &&
+                        this.x + this.width > p.x &&
+                        this.y < p.y + p.height &&
+                        this.y + this.height > p.y
+                    ) {
+                        // Vertical collision (Landing)
+                        if (this.vy > 0 && this.y + this.height - this.vy <= p.y) {
+                            this.y = p.y - this.height;
+                            this.vy = 0;
+                            this.onGround = true;
+                        } else if (this.vy < 0 && this.y - this.vy >= p.y + p.height) {
+                            // Vertical collision (Hitting bottom)
+                            this.y = p.y + p.height;
+                            this.vy = 0;
+                        }
+
+                        // Horizontal collision (Reverse patrol direction)
+                        if (this.x + this.width - this.vx <= p.x || this.x - this.vx >= p.x + p.width) {
+                            this.vx *= -1;
+                        }
+                    }
+                });
+            }
+        }
+
+        // Heavy Enemy Type (Section 2C)
+        class HeavyEnemy extends Enemy {
+            constructor(x, y) {
+                super(x, y, 20, 35, '#990000', 2, 80); // Taller, wider, darker red, 2 Health, wider patrol
+                this.startX = x;
+            }
+        }
+
+        // Base Projectile class
+        class Projectile {
+            constructor(x, y, direction, damage = 1) {
+                this.x = x;
+                this.y = y;
+                this.width = 8;
+                this.height = 3;
+                this.vx = direction * PROJECTILE_SPEED;
+                this.isLive = true;
+                this.color = '#ffcc00'; // Yellow bullet
+                this.damage = damage;
+            }
+
+            draw() {
+                if (!this.isLive) return;
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+            }
+
+            update() {
+                if (!this.isLive) return;
+                this.x += this.vx;
+
+                // Check for collision with platforms
+                for (const p of platforms) {
+                    if (
+                        this.x < p.x + p.width &&
+                        this.x + this.width > p.x &&
+                        this.y < p.y + p.height &&
+                        this.y + this.height > p.y
+                    ) {
+                        this.isLive = false;
+                        return;
+                    }
+                }
+                
+                // Check for canvas boundaries
+                if (this.x < 0 || this.x > canvas.width || this.y < 0 || this.y > canvas.height) {
+                    this.isLive = false;
+                    return;
+                }
+
+                // Check collision with enemies (Updated to use damage property)
+                enemies.forEach(enemy => {
+                    if (enemy.isAlive &&
+                        this.x < enemy.x + enemy.width &&
+                        this.x + this.width > enemy.x &&
+                        this.y < enemy.y + enemy.height &&
+                        this.y + this.height > enemy.y
+                    ) {
+                        this.isLive = false;
+                        enemy.health -= this.damage;
+                        // Spawn particles (Section 2D)
+                        for(let i=0; i<3; i++) {
+                            particles.push(new Particle(enemy.x + enemy.width/2, enemy.y + enemy.height/2, '#7CFC00')); // Green blood
+                        }
+
+                        if (enemy.health <= 0) {
+                            enemy.isAlive = false;
+                            // Spawn more particles on death (Section 2D)
+                            for(let i=0; i<10; i++) {
+                                particles.push(new Particle(enemy.x + enemy.width/2, enemy.y + enemy.height/2, '#7CFC00')); 
+                            }
+                            checkWinCondition();
+                        }
+                    }
+                });
+            }
+        }
+
+        // Grenade Projectile (Section 3E)
+        class Grenade extends Projectile {
+            constructor(x, y, direction) {
+                super(x, y, direction, 3); // High damage
+                this.width = 4;
+                this.height = 4;
+                this.color = '#ff9900'; // Orange/Yellow
+                this.vx = direction * 5; // Slower horizontal launch
+                this.vy = -8; // Upward initial launch force (arc)
+                this.bounces = 0;
+            }
+            update() {
+                if (!this.isLive) return;
+                
+                // Apply gravity
+                this.vy += GRAVITY * 0.8;
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Simple Bounce logic (collision with platforms)
+                platforms.forEach(p => {
+                    if (
+                        this.x < p.x + p.width && this.x + this.width > p.x &&
+                        this.y < p.y + p.height && this.y + this.height > p.y
+                    ) {
+                        // Vertical bounce
+                        if (this.vy > 0 && this.y + this.height - this.vy <= p.y) {
+                            this.y = p.y - this.height;
+                            this.vy *= -0.5; // Reverse and lose half velocity (bounciness)
+                            this.bounces++;
+                        }
+                        // Horizontal bounce
+                        else if (this.x + this.width - this.vx <= p.x || this.x - this.vx >= p.x + p.width) {
+                            this.vx *= -1;
+                            this.bounces++;
+                        }
+                        
+                        if (this.bounces > 3 || (this.bounces > 0 && Math.abs(this.vy) < 1 && Math.abs(this.vx) < 1)) {
+                            this.isLive = false; // Explode on too many bounces or when stopping
+                        }
+                    }
+                });
+
+                // Check collision with enemies (updated logic for high damage)
+                enemies.forEach(enemy => {
+                    if (enemy.isAlive &&
+                        this.x < enemy.x + enemy.width &&
+                        this.x + this.width > enemy.x &&
+                        this.y < enemy.y + enemy.height &&
+                        this.y + this.height > enemy.y
+                    ) {
+                        this.isLive = false; // Explode on contact
+                        enemy.health -= this.damage; 
+                        // Spawn explosion/death particles
+                        for(let i=0; i<15; i++) {
+                            particles.push(new Particle(enemy.x + enemy.width/2, enemy.y + enemy.height/2, '#FF4500')); 
+                        }
+                        if (enemy.health <= 0) {
+                            enemy.isAlive = false;
+                        }
+                        checkWinCondition();
+                    }
+                });
+            }
+        }
+
+
+        // Level Geometry (Platforms and Walls)
+        const platforms = [
+            // Main floor (Dark Grey Base)
+            { x: 0, y: 350, width: 800, height: 50, color: '#333333' },
+
+            // Lowered section (Step up)
+            { x: 0, y: 330, width: 400, height: 20, color: '#555555' }, // Base platform 1
+
+            // Elevated platform
+            { x: 400, y: 300, width: 400, height: 50, color: '#333333' }, // Base platform 2 (higher section)
+
+            // Red carpet/trim on main platforms
+            { x: 0, y: 320, width: 400, height: 10, color: '#a00000' },
+            { x: 400, y: 290, width: 400, height: 10, color: '#a00000' },
+
+            // Brown Brick Ceiling/Walls (Top Layer)
+            { x: 0, y: 0, width: 800, height: 40, color: '#582c0e' }, // Ceiling
+            // Walls: Non-lethal boundaries
+            { x: 0, y: 0, width: 20, height: 350, color: '#582c0e' }, // Left Wall
+            { x: 780, y: 0, width: 20, height: 350, color: '#582c0e' }, // Right Wall
+
+            // Ceiling structures (to match the image)
+            { x: 100, y: 40, width: 80, height: 40, color: '#582c0e' },
+            { x: 250, y: 40, width: 80, height: 40, color: '#582c0e' },
+            { x: 500, y: 40, width: 80, height: 40, color: '#582c0e' },
+        ];
+
+        // Level elements (Doors, Window - for drawing only)
+        const environmentElements = [
+            // Interior Wall Color (Light Grey)
+            { x: 20, y: 40, width: 760, height: 310, color: '#e0e0e0' },
+
+            // Doors (Brown) - Must be drawn behind the floor platforms
+            { x: 150, y: 270, width: 40, height: 60, color: '#654321' },
+            { x: 350, y: 270, width: 40, height: 60, color: '#654321' },
+            { x: 550, y: 240, width: 40, height: 60, color: '#654321' },
+            { x: 730, y: 240, width: 40, height: 60, color: '#654321' },
+        ];
+
+        let enemies = [];
+        let projectiles = [];
+        
+        // --- Initialization ---
+
+        function initGame() {
+            // Player starts here
+            player.x = 50; 
+            player.y = 300;
+            player.vx = 0;
+            player.vy = 0;
+            player.health = 3;
+            player.isInvincible = false;
+            player.invincibleTimer = 0;
+            player.currentWeapon = 'Bullet';
+
+            // Reset/Setup Enemies (Section 2C)
+            enemies = [
+                // Enemy 1: On the lower platform
+                new Enemy(300, 290, 15, 30, '#006400', 1, 100),
+                // Enemy 2: On the elevated platform
+                new HeavyEnemy(500, 265),
+                // Enemy 3: On the elevated platform
+                new Enemy(700, 270, 15, 30, '#006400', 1, 50)
+            ];
+            projectiles = [];
+            particles = [];
+        }
+
+        // --- Event Handlers (Updated for Tab Key and jump key mapping) ---
+
+        window.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) {
+                keys[key] = true;
+                e.preventDefault();
+            }
+            if (key === 'tab') { // For weapon switch (Section 3E)
+                keys.tab = true;
+                e.preventDefault();
+            }
+            if (keys.w && player.onGround && !isGameOver) { // 'W' for jump
+                player.vy = JUMP_FORCE;
+                player.onGround = false;
+            }
+            if (keys.space && !isGameOver) { // 'Space' for shoot
+                 fireProjectile();
+                 keys.space = false; // Prevents continuous fire on hold
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            const key = e.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) {
+                keys[key] = false;
+            }
+            if (key === 'tab') { // For weapon switch (Section 3E)
+                keys.tab = false;
+            }
+        });
+
+        function fireProjectile() {
+            if (isGameOver) return;
+            // Determine which weapon class to use (Section 3E)
+            const WeaponClass = player.currentWeapon === 'Bullet' ? Projectile : Grenade;
+
+            // Player fires a projectile in the direction they are facing
+            const startX = player.x + (player.facing > 0 ? player.width : -8);
+            const startY = player.y + player.height / 2 - 1;
+            
+            projectiles.push(new WeaponClass(startX, startY, player.facing));
+        }
+
+        // --- Game Functions ---
+
+        function updatePlayer() {
+            if (isGameOver) return;
+
+            // Apply horizontal movement
+            let targetVx = 0;
+            if (keys.a) {
+                targetVx = -PLAYER_SPEED;
+                player.facing = -1;
+            }
+            if (keys.d) {
+                targetVx = PLAYER_SPEED;
+                player.facing = 1;
+            }
+
+            // Apply Friction/Deceleration (Section 1A)
+            if (targetVx !== 0) {
+                player.vx = targetVx;
+            } else {
+                player.vx *= 0.85; // Decelerate by 15%
+                if (Math.abs(player.vx) < 0.1) {
+                    player.vx = 0;
+                }
+            }
+
+            // --- Weapon Switching Logic (Section 3E) ---
+            if (keys.tab) {
+                player.currentWeapon = (player.currentWeapon === 'Bullet') ? 'Grenade' : 'Bullet';
+                // Reset tab state to prevent rapid switching (handled in keydown listener for smoother feel)
+                keys.tab = false; 
+            }
+            
+            // Apply gravity
+            player.vy += GRAVITY;
+
+            // Apply velocity
+            player.x += player.vx;
+            player.y += player.vy;
+
+            // Collision check flags
+            let landing = false;
+
+            platforms.forEach(p => {
+                // Check for collision
+                if (
+                    player.x < p.x + p.width &&
+                    player.x + player.width > p.x &&
+                    player.y < p.y + p.height &&
+                    player.y + player.height > p.y
+                ) {
+                    // 1. Vertical collision (landing on top)
+                    if (player.vy > 0 && player.y + player.height - player.vy <= p.y) {
+                        player.y = p.y - player.height;
+                        player.vy = 0;
+                        landing = true;
+                    }
+                    // 2. Vertical collision (hitting bottom)
+                    else if (player.vy < 0 && player.y - player.vy >= p.y + p.height) {
+                        player.y = p.y + p.height;
+                        player.vy = 0;
+                    }
+                    // 3. Horizontal collision (against sides of ALL platforms)
+                    else if (player.vy === 0) { 
+                        if (player.vx > 0) player.x = p.x - player.width;
+                        if (player.vx < 0) player.x = p.x + p.width;
+                    }
+                }
+            });
+            
+            player.onGround = landing;
+
+            // Final boundary check for falling off the bottom
+            if (player.y + player.height > canvas.height) {
+                player.y = canvas.height - player.height;
+                player.vy = 0;
+                player.onGround = true;
+            }
+        }
+
+        function updateGame() {
+            if (isGameOver) return;
+
+            updatePlayer();
+
+            // --- Invincibility Timer Logic (Section 1B) ---
+            if (player.isInvincible) {
+                player.invincibleTimer--;
+                if (player.invincibleTimer <= 0) {
+                    player.isInvincible = false;
+                }
+            }
+            // ---------------------------------------------
+            
+            enemies.forEach(e => e.update(platforms));
+
+            // Update and filter projectiles
+            projectiles.forEach(p => p.update());
+            projectiles = projectiles.filter(p => p.isLive);
+
+            // Update and filter particles (Section 2D)
+            particles.forEach(p => p.update());
+            particles = particles.filter(p => p.life > 0);
+        }
+
+        function drawGame() {
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 1. Draw Environment Elements (Background, Interior Wall, Doors)
+            environmentElements.forEach(e => {
+                ctx.fillStyle = e.color;
+                ctx.fillRect(e.x, e.y, e.width, e.height);
+            });
+
+            // 2. Draw Platforms (Foreground Walls/Floors)
+            platforms.forEach(p => {
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x, p.y, p.width, p.height);
+            });
+
+            // 3. Draw Projectiles
+            projectiles.forEach(p => p.draw());
+
+            // 4. Draw Enemies
+            enemies.forEach(e => e.draw());
+
+            // 5. Draw Particles (Section 2D)
+            particles.forEach(p => p.draw());
+
+            // 6. Draw Player
+            ctx.fillStyle = player.color;
+            
+            // --- Invincibility Flicker Effect (Section 1B) ---
+            if (player.isInvincible && player.invincibleTimer % 10 < 5) {
+                ctx.globalAlpha = 0.5; // Flicker effect
+            }
+            // ----------------------------------------
+            
+            ctx.fillRect(player.x, player.y, player.width, player.height);
+            ctx.globalAlpha = 1.0; // Reset alpha for other elements
+            
+            // Draw player's gun (simple rectangle)
+            ctx.fillStyle = '#444';
+            // Offset gun drawing based on current weapon
+            if (player.currentWeapon === 'Bullet') {
+                // Gun sprite (small)
+                ctx.fillRect(player.x + (player.facing > 0 ? player.width : -5), player.y + 10, 10, 3);
+            } else {
+                 // Grenade launcher/arm position (slightly different visualization for grenade)
+                 ctx.fillStyle = '#8B4513';
+                 ctx.fillRect(player.x + (player.facing > 0 ? player.width : -5), player.y + 10, 5, 5);
+            }
+
+
+            // 7. Draw HUD (Health and Score)
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px "Press Start 2P"';
+            ctx.fillText(`HEALTH: ${'♥️'.repeat(player.health)}`, 25, 20);
+            ctx.fillText(`ENEMIES: ${enemies.filter(e => e.isAlive).length}`, canvas.width - 150, 20);
+            ctx.fillText(`WEAPON: ${player.currentWeapon}`, 25, 40);
+        }
+
+        function gameLoop() {
+            updateGame();
+            drawGame();
+        }
+
+        function checkWinCondition() {
+            if (enemies.filter(e => e.isAlive).length === 0) {
+                endGame("VICTORY! All threats neutralized.");
+            }
+        }
+
+        function endGame(message) {
+            isGameOver = true;
+            clearInterval(gameLoopInterval);
+            messageText.textContent = message;
+            messageBox.style.display = 'block';
+        }
+
+        function startGame() {
+            messageBox.style.display = 'none';
+            initGame();
+            if (gameLoopInterval) {
+                clearInterval(gameLoopInterval);
+            }
+            gameLoopInterval = setInterval(gameLoop, 1000 / 60); // 60 FPS
+            // Ensure first draw happens immediately
+            drawGame();
+        }
+
+        // Start the game when the window loads
+        window.onload = startGame;
+
+    </script>
+</body>
+</html>
